@@ -9,8 +9,49 @@ const { detectIntent, quickResponses } = require('./utils/responses');
 
 require('dotenv').config();
 
-// ==================== KONFIGURASI ====================
-const BOT_NUMBER = process.env.BOT_NUMBER || '6289602717697';
+// ==================== KONFIGURASI & VALIDASI NOMOR ====================
+
+function formatPhoneNumber(number) {
+  // Hapus semua non-digit
+  let clean = number.replace(/\D/g, '');
+  
+  // Jika diawali 0, ganti dengan 62
+  if (clean.startsWith('0')) {
+    clean = '62' + clean.slice(1);
+  }
+  
+  // Jika diawali +, hapus +
+  if (clean.startsWith('62') === false && clean.startsWith('8')) {
+    clean = '62' + clean;
+  }
+  
+  // Pastikan diawali 62
+  if (!clean.startsWith('62')) {
+    throw new Error(`Nomor harus diawali 62 atau 0. Diterima: ${number}`);
+  }
+  
+  // Validasi panjang (minimal 10 digit setelah 62)
+  if (clean.length < 12 || clean.length > 15) {
+    throw new Error(`Panjang nomor tidak valid: ${clean.length} digit. Harus 12-15 digit.`);
+  }
+  
+  return clean;
+}
+
+// Format nomor dari env
+let BOT_NUMBER;
+try {
+  const rawNumber = process.env.BOT_NUMBER || '6289602717697';
+  BOT_NUMBER = formatPhoneNumber(rawNumber);
+  console.log('📱 Nomor Bot:', BOT_NUMBER);
+  console.log('✅ Format nomor valid!');
+} catch (err) {
+  console.error('❌ ERROR FORMAT NOMOR:', err.message);
+  console.log('\n💡 Contoh format yang benar:');
+  console.log('   BOT_NUMBER=6289602717697');
+  console.log('   BOT_NUMBER=089602717697');
+  process.exit(1);
+}
 
 // In-memory storage
 const processedMessages = new Set();
@@ -18,8 +59,8 @@ const chatContexts = new Map();
 
 // ==================== MAIN BOT ====================
 async function startBot() {
-  console.log('🚀 Memulai WhatsApp Bot...');
-  console.log('📱 Nomor Bot:', BOT_NUMBER);
+  console.log('\n🚀 Memulai WhatsApp Bot...');
+  console.log('🔑 Mode: PAIRING CODE');
 
   // Auth state
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
@@ -28,12 +69,11 @@ async function startBot() {
   const { version, isLatest } = await fetchLatestBaileysVersion();
   console.log(`📦 Baileys v${version.join('.')}, Latest: ${isLatest}`);
 
-  // Buat socket dengan config yang benar untuk pairing code
+  // Buat socket
   const sock = makeWASocket({
     version,
     printQRInTerminal: false,
     auth: state,
-    // Browser harus Chrome Desktop agar pairing code work
     browser: ['Chrome (Linux)', '', ''],
     markOnlineOnConnect: true,
     connectTimeoutMs: 60000,
@@ -44,7 +84,6 @@ async function startBot() {
     maxMsgRetryCount: 5,
     msgRetryCounterMap: {},
     fireInitQueries: true,
-    // Penting untuk pairing code
     linkPreviewImageThumbnailWidth: 192,
     transactionOpts: { 
       maxCommitRetries: 10, 
@@ -62,37 +101,49 @@ async function startBot() {
     console.log('\n📲 MENGHUBUNGKAN DENGAN PAIRING CODE...');
     console.log('⏳ Mohon tunggu sebentar...\n');
 
-    // Format nomor: hapus semua non-digit
-    const phoneNumber = BOT_NUMBER.replace(/\D/g, '');
+    const phoneNumber = BOT_NUMBER;
     
     console.log('📱 Nomor yang digunakan:', phoneNumber);
+    console.log('📱 JID target:', `${phoneNumber}@s.whatsapp.net`);
     
     try {
-      // Delay sebelum request pairing code (penting!)
-      await delay(2000);
+      // Delay sebelum request
+      await delay(3000);
       
       // Request pairing code dengan retry
       let code = null;
-      let retries = 3;
+      let retries = 5;
+      let lastError = null;
       
       while (!code && retries > 0) {
         try {
-          console.log(`🔄 Request pairing code (attempt ${4 - retries}/3)...`);
+          console.log(`🔄 Request pairing code (attempt ${6 - retries}/5)...`);
+          
+          // Request pairing code
           code = await sock.requestPairingCode(phoneNumber);
-          break;
+          
+          if (code) {
+            console.log('✅ Pairing code berhasil digenerate!');
+            break;
+          }
+          
         } catch (err) {
+          lastError = err;
           retries--;
-          console.log(`⚠️ Gagal, retry... (${retries} attempts left)`);
+          console.log(`⚠️ Gagal: ${err.message}`);
+          console.log(`   Retry dalam 3 detik... (${retries} attempts left)`);
           await delay(3000);
         }
       }
 
       if (!code) {
-        throw new Error('Gagal generate pairing code setelah 3 kali percobaan');
+        throw new Error(`Gagal setelah 5 kali percobaan. Last error: ${lastError?.message}`);
       }
       
-      // Format kode dengan spasi biar mudah dibaca
-      const formattedCode = code.match(/.{1,4}/g).join('-');
+      // Format kode
+      const formattedCode = code.length > 8 
+        ? code.match(/.{1,4}/g).join('-') 
+        : code;
       
       console.log('\n╔═══════════════════════════════════════════╗');
       console.log('║                                           ║');
@@ -102,9 +153,9 @@ async function startBot() {
       console.log('║                                           ║');
       console.log('║     📱 CARA MENGGUNAKAN:                  ║');
       console.log('║     1. Buka WhatsApp di HP kamu           ║');
-      console.log('║     2. Klik titik tiga (⋮) di pojok kanan ║');
-      console.log('║     3. Pilih "Perangkat Tertaut"          ║');
-      console.log('║     4. Klik "Tautkan Perangkat"           ║');
+      console.log('║     2. Klik titik tiga (⋮)                ║');
+      console.log('║     3. Perangkat Tertaut                  ║');
+      console.log('║     4. Tautkan Perangkat Baru             ║');
       console.log('║     5. Pilih "Tautkan dengan nomor"       ║');
       console.log('║     6. Masukkan kode di atas              ║');
       console.log('║                                           ║');
@@ -113,12 +164,12 @@ async function startBot() {
 
     } catch (err) {
       console.error('\n❌ Gagal generate pairing code:', err.message);
-      console.log('\n💡 SOLUSI ALTERNATIF:');
+      console.log('\n💡 SOLUSI:');
       console.log('   1. Hapus folder auth_info/');
-      console.log('   2. Pastikan nomor belum terdaftar di Baileys lain');
-      console.log('   3. Pastikan nomor aktif di WhatsApp');
-      console.log('   4. Restart bot dan coba lagi');
-      console.log('   5. Jika masih gagal, gunakan QR Code lokal dulu\n');
+      console.log('   2. Pastikan nomor aktif di WhatsApp');
+      console.log('   3. Pastikan nomor belum terdaftar di Baileys lain');
+      console.log('   4. Coba jalankan di lokal dulu (scan QR)');
+      console.log('   5. Upload folder auth_info/ ke Railway\n');
       process.exit(1);
     }
   }
