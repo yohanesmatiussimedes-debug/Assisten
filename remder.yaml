@@ -1,0 +1,11 @@
+services:
+  - type: worker
+    name: whatsapp-ai-bot
+    runtime: node
+    buildCommand: npm install
+    startCommand: node src/bot.js
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: BOT_NUMBER
+        value: "6289602717697"
