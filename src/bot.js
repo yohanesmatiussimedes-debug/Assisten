@@ -4,23 +4,23 @@ const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion 
 } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
 const { getAIResponse } = require('./gemini');
 const { detectIntent, quickResponses } = require('./utils/responses');
 
 require('dotenv').config();
 
-// Konfigurasi
+// ==================== KONFIGURASI ====================
 const BOT_NUMBER = process.env.BOT_NUMBER || '6289602717697';
-const OWNER_JID = `${BOT_NUMBER}@s.whatsapp.net`;
 
 // In-memory storage
-const processedMessages = new Set(); // Hindari duplikat
-const userStates = new Map(); // Track status user
+const processedMessages = new Set();
+const chatContexts = new Map();
 
+// ==================== MAIN BOT ====================
 async function startBot() {
   console.log('🚀 Memulai WhatsApp Bot...');
   console.log('📱 Nomor Bot:', BOT_NUMBER);
+  console.log('🔑 Mode: PAIRING CODE (Tanpa QR)');
 
   // Auth state
   const { state, saveCreds } = await useMultiFileAuthState('./auth_info');
@@ -32,49 +32,97 @@ async function startBot() {
   // Buat socket
   const sock = makeWASocket({
     version,
-    printQRInTerminal: true,
+    printQRInTerminal: false, // ❌ Matikan QR
     auth: state,
-    browser: ['WhatsApp AI Bot', 'Chrome', '1.0.0'],
+    browser: ['Chrome (Linux)', '', ''],
     markOnlineOnConnect: true,
-    // Retry logic
     connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
     keepAliveIntervalMs: 30000,
+    shouldSyncHistoryMessage: () => false,
+    syncFullHistory: false,
+    maxMsgRetryCount: 5,
+    msgRetryCounterMap: {},
+    fireInitQueries: true,
+    auth: {
+      creds: state.creds,
+      keys: state.keys,
+    }
   });
 
-  // Save credentials
+  // ==================== PAIRING CODE ====================
+  if (!sock.authState.creds.registered) {
+    console.log('\n📲 MENGHUBUNGKAN DENGAN PAIRING CODE...');
+    console.log('⏳ Mohon tunggu sebentar...\n');
+
+    const phoneNumber = BOT_NUMBER.replace(/\D/g, '');
+    
+    try {
+      // Request pairing code
+      const code = await sock.requestPairingCode(phoneNumber);
+      
+      // Format kode dengan spasi biar mudah dibaca
+      const formattedCode = code.match(/.{1,4}/g).join('-');
+      
+      console.log('╔═══════════════════════════════════════════╗');
+      console.log('║                                           ║');
+      console.log('║     🔑 PAIRING CODE ANDA:                 ║');
+      console.log('║                                           ║');
+      console.log(`║        ${formattedCode}                   ║`);
+      console.log('║                                           ║');
+      console.log('║     📱 CARA MENGGUNAKAN:                  ║');
+      console.log('║     1. Buka WhatsApp di HP kamu           ║');
+      console.log('║     2. Menu → Perangkat Tertaut           ║');
+      console.log('║     3. Tautkan Perangkat Baru             ║');
+      console.log('║     4. Pilih "Tautkan dengan nomor"       ║');
+      console.log('║     5. Masukkan kode di atas              ║');
+      console.log('║                                           ║');
+      console.log('╚═══════════════════════════════════════════╝\n');
+
+    } catch (err) {
+      console.error('❌ Gagal generate pairing code:', err.message);
+      console.log('💡 Tips: Pastikan nomor valid dan belum terdaftar di Baileys lain.');
+      process.exit(1);
+    }
+  }
+
+  // ==================== EVENT HANDLERS ====================
+
   sock.ev.on('creds.update', saveCreds);
 
-  // Connection update
   sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      console.log('📲 Scan QR Code ini dengan WhatsApp:');
-      qrcode.generate(qr, { small: true });
-    }
+    const { connection, lastDisconnect } = update;
 
     if (connection === 'close') {
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      console.log('❌ Koneksi terputus:', lastDisconnect?.error?.message);
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       
+      console.log('❌ Koneksi terputus:', lastDisconnect?.error?.message);
+
       if (shouldReconnect) {
-        console.log('🔄 Mencoba reconnect...');
+        console.log('🔄 Mencoba reconnect dalam 5 detik...');
         setTimeout(startBot, 5000);
       } else {
-        console.log('🚪 Logged out. Hapus folder auth_info dan scan ulang.');
+        console.log('🚪 Logged out. Hapus folder auth_info dan restart bot.');
+        process.exit(0);
       }
-    } else if (connection === 'open') {
-      console.log('✅ Bot terhubung!');
-      console.log(`🤖 Bot siap melayani! Kirim pesan ke ${BOT_NUMBER}`);
+    } 
+    else if (connection === 'open') {
+      console.log('\n✅✅✅ BOT TERHUBUNG! ✅✅✅');
+      console.log(`🤖 Bot siap melayani!`);
+      console.log(`📱 Nomor aktif: ${BOT_NUMBER}`);
+      console.log(`⏰ Waktu: ${new Date().toLocaleString()}`);
+      console.log('═══════════════════════════════════════════\n');
+    }
+    else if (connection === 'connecting') {
+      console.log('⏳ Menghubungkan ke WhatsApp...');
     }
   });
 
-  // Handle incoming messages
+  // ==================== MESSAGE HANDLER ====================
   sock.ev.on('messages.upsert', async (m) => {
     const message = m.messages[0];
     
-    // Skip jika pesan dari bot sendiri atau status broadcast
     if (!message.message || message.key.fromMe || message.key.remoteJid === 'status@broadcast') {
       return;
     }
@@ -83,16 +131,13 @@ async function startBot() {
     const senderName = message.pushName || 'Seseorang';
     const messageId = message.key.id;
     
-    // Hindari pesan duplikat
     if (processedMessages.has(messageId)) return;
     processedMessages.add(messageId);
     
-    // Bersihkan cache pesan (biar nggak bengkak)
     if (processedMessages.size > 1000) {
       processedMessages.clear();
     }
 
-    // Extract text dari berbagai tipe pesan
     const text = extractText(message);
     if (!text) {
       console.log(`📎 Pesan non-text dari ${senderName}, diabaikan.`);
@@ -104,11 +149,9 @@ async function startBot() {
     console.log(`   Pesan: ${text.substring(0, 100)}${text.length > 100 ? '...' : ''}`);
 
     try {
-      // Cek apakah ini chat pribadi atau grup
       const isGroup = sender.endsWith('@g.us');
       
       if (isGroup) {
-        // Di grup, hanya balas jika di-mention atau reply ke bot
         const isMentioned = text.includes(`@${BOT_NUMBER}`) || 
                           text.toLowerCase().includes('bot') ||
                           text.toLowerCase().includes('asisten');
@@ -119,54 +162,44 @@ async function startBot() {
         }
       }
 
-      // Typing indicator
       await sock.sendPresenceUpdate('composing', sender);
 
-      // Delay random biar kelihatan natural (1-3 detik)
       const delay = Math.floor(Math.random() * 2000) + 1000;
       await new Promise(resolve => setTimeout(resolve, delay));
 
-      // Generate response
       let response;
       const intent = detectIntent(text);
 
-      // Jika user tanya identitas atau greeting, bisa pakai quick response
       if (intent === 'identity' || intent === 'goodbye') {
         response = quickResponses[intent];
       } else {
-        // Gunakan AI Gemini
         response = await getAIResponse(text, senderName, sender);
       }
 
-      // Kirim balasan
       await sock.sendMessage(sender, { text: response });
 
       console.log(`🤖 Balasan: ${response.substring(0, 100)}${response.length > 100 ? '...' : ''}`);
 
-      // Update presence
       await sock.sendPresenceUpdate('available', sender);
 
     } catch (error) {
       console.error('❌ Error memproses pesan:', error);
       
-      // Kirim pesan error
       try {
-        await sock.sendMessage(sender, { 
-          text: quickResponses.error 
-        });
+        await sock.sendMessage(sender, { text: quickResponses.error });
       } catch (sendError) {
         console.error('❌ Gagal kirim pesan error:', sendError);
       }
     }
   });
 
-  // Log semua event (debug)
   sock.ev.on('message.delete', (item) => {
     console.log('🗑️ Pesan dihapus:', item);
   });
 }
 
-// Helper: Extract text dari pesan
+// ==================== HELPERS ====================
+
 function extractText(message) {
   const msg = message.message;
   
@@ -179,7 +212,8 @@ function extractText(message) {
   return null;
 }
 
-// Graceful shutdown
+// ==================== GRACEFUL SHUTDOWN ====================
+
 process.on('SIGINT', () => {
   console.log('\n👋 Bot dimatikan. Sampai jumpa!');
   process.exit(0);
@@ -190,7 +224,16 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
-// Start bot
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught Exception:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// ==================== START ====================
 startBot().catch(err => {
   console.error('❌ Fatal error:', err);
   process.exit(1);
